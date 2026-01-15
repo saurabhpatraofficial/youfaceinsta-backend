@@ -1,91 +1,38 @@
 const express = require('express');
 const cors = require('cors');
-const ytdlp = require('yt-dlp-exec');
+const { exec } = require('child_process');
+const { promisify } = require('util');
 
+const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Platform URL validators
+// URL validators
 const PLATFORM_PATTERNS = {
-    youtube: [
-        /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/i,
-        /^(https?:\/\/)?(m\.)?youtube\.com\/.+/i
-    ],
-    facebook: [
-        /^(https?:\/\/)?(www\.)?(facebook\.com|fb\.watch)\/.+/i,
-        /^(https?:\/\/)?(m\.)?facebook\.com\/.+/i
-    ],
-    instagram: [
-        /^(https?:\/\/)?(www\.)?instagram\.com\/(p|reel|reels|tv|stories)\/.+/i
-    ]
+    youtube: /^(https?:\/\/)?(www\.|m\.)?(youtube\.com|youtu\.be)\/.+/i,
+    facebook: /^(https?:\/\/)?(www\.|m\.|web\.)?(facebook\.com|fb\.watch)\/.+/i,
+    instagram: /^(https?:\/\/)?(www\.)?instagram\.com\/(p|reel|reels|tv)\/.+/i
 };
 
 function validateUrl(url, platform) {
-    const patterns = PLATFORM_PATTERNS[platform];
-    if (!patterns) return false;
-    return patterns.some(pattern => pattern.test(url));
+    return PLATFORM_PATTERNS[platform]?.test(url);
 }
 
-// Health check endpoint
+// Health check
 app.get('/', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        message: 'YouFaceInsta Backend API',
-        endpoints: {
-            download: 'POST /download',
-            info: 'POST /info'
-        }
-    });
+    res.json({ status: 'ok', message: 'YouFaceInsta API' });
 });
 
-// Get video info without downloading
-app.post('/info', async (req, res) => {
-    try {
-        const { url } = req.body;
-        
-        if (!url) {
-            return res.status(400).json({ error: 'URL is required' });
-        }
-
-        const info = await ytdlp(url, {
-            dumpSingleJson: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            preferFreeFormats: true
-        });
-
-        res.json({
-            success: true,
-            title: info.title,
-            duration: info.duration,
-            thumbnail: info.thumbnail,
-            formats: info.formats?.map(f => ({
-                formatId: f.format_id,
-                ext: f.ext,
-                resolution: f.resolution,
-                filesize: f.filesize
-            }))
-        });
-    } catch (error) {
-        console.error('Info error:', error.message);
-        res.status(500).json({ error: 'Failed to get video info' });
-    }
-});
-
-// Download endpoint - returns direct URL
+// Download endpoint
 app.post('/download', async (req, res) => {
     try {
         const { url, platform, format, quality } = req.body;
 
-        // Validate request
         if (!url || !platform || !format) {
-            return res.status(400).json({ 
-                error: 'Missing required fields: url, platform, format' 
-            });
+            return res.status(400).json({ error: 'Missing required fields' });
         }
 
         if (!['youtube', 'facebook', 'instagram'].includes(platform)) {
@@ -96,62 +43,55 @@ app.post('/download', async (req, res) => {
             return res.status(400).json({ error: `Invalid ${platform} URL` });
         }
 
-        console.log(`Processing ${platform} ${format} request for: ${url}`);
+        console.log(`Processing: ${platform} | ${format} | ${url}`);
 
-        // Build yt-dlp options
-        let ytdlpOptions = {
-            getUrl: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            preferFreeFormats: true
-        };
+        // Build yt-dlp command
+        let cmd = 'yt-dlp';
+        cmd += ' --no-warnings';
+        cmd += ' --no-playlist';
+        cmd += ' -g'; // Get direct URL only
 
         if (format === 'audio') {
-            // Audio extraction
-            ytdlpOptions.extractAudio = true;
-            ytdlpOptions.audioFormat = 'mp3';
-            ytdlpOptions.format = 'bestaudio/best';
-            
-            if (platform === 'youtube' && quality) {
-                const bitrateMap = { '320': '320K', '240': '240K', '160': '160K' };
-                ytdlpOptions.audioQuality = bitrateMap[quality] || '320K';
-            }
+            cmd += ' -f "bestaudio/best"';
         } else {
-            // Video download
-            if (platform === 'youtube' && quality) {
-                const qualityMap = {
-                    '4320': 'bestvideo[height<=4320]+bestaudio/best[height<=4320]',
-                    '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
-                    '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-                    '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-                    '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]'
-                };
-                ytdlpOptions.format = qualityMap[quality] || 'bestvideo+bestaudio/best';
-            } else {
-                ytdlpOptions.format = 'bestvideo+bestaudio/best';
-            }
+            // Video with quality
+            const qualityMap = {
+                '4320': 'bestvideo[height<=4320]+bestaudio/best[height<=4320]/best',
+                '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best',
+                '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+                '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+                '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]/best'
+            };
+            const formatStr = qualityMap[quality] || qualityMap['720'];
+            cmd += ` -f "${formatStr}"`;
         }
 
-        // Get download URL
-        const output = await ytdlp(url, ytdlpOptions);
-        
-        // Parse output - yt-dlp returns URL(s) as string
-        const urls = output.trim().split('\n').filter(u => u.startsWith('http'));
+        // Escape URL properly
+        const safeUrl = url.replace(/"/g, '\\"');
+        cmd += ` "${safeUrl}"`;
+
+        console.log(`Running: ${cmd}`);
+
+        // Execute yt-dlp
+        const { stdout, stderr } = await execAsync(cmd, { 
+            timeout: 30000,
+            maxBuffer: 1024 * 1024 * 5
+        });
+
+        const urls = stdout.trim().split('\n').filter(u => u.startsWith('http'));
         
         if (urls.length === 0) {
             throw new Error('No download URL found');
         }
 
-        // Get video title for filename
-        let filename = `${platform}_download`;
+        // Get title for filename
+        let title = 'download';
         try {
-            const info = await ytdlp(url, {
-                print: '%(title)s',
-                noWarnings: true
-            });
-            filename = info.trim().replace(/[<>:"/\\|?*]/g, '_');
+            const titleCmd = `yt-dlp --print "%(title)s" --no-warnings "${safeUrl}"`;
+            const titleResult = await execAsync(titleCmd, { timeout: 10000 });
+            title = titleResult.stdout.trim().replace(/[<>:"/\\|?*]/g, '_').substring(0, 100) || 'download';
         } catch (e) {
-            console.log('Could not get title:', e.message);
+            console.log('Could not get title');
         }
 
         const ext = format === 'audio' ? 'mp3' : 'mp4';
@@ -159,30 +99,29 @@ app.post('/download', async (req, res) => {
         res.json({
             success: true,
             directUrl: urls[0],
-            filename: `${filename}.${ext}`,
-            platform,
-            format
+            filename: `${title}.${ext}`,
+            title: title
         });
 
     } catch (error) {
-        console.error('Download error:', error.message);
+        console.error('Error:', error.message);
         
-        let errorMessage = 'Download failed. Please try again.';
+        let errorMsg = 'Download failed. Please try again.';
         
         if (error.message.includes('Private video')) {
-            errorMessage = 'This video is private';
+            errorMsg = 'This video is private';
         } else if (error.message.includes('Video unavailable')) {
-            errorMessage = 'Video is unavailable';
+            errorMsg = 'Video is unavailable';
         } else if (error.message.includes('Sign in')) {
-            errorMessage = 'This content requires login';
-        } else if (error.message.includes('not found')) {
-            errorMessage = 'Content not found';
+            errorMsg = 'This content requires login';
+        } else if (error.message.includes('timeout')) {
+            errorMsg = 'Request timed out. Try again.';
         }
 
-        res.status(500).json({ error: errorMessage });
+        res.status(500).json({ error: errorMsg });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 YouFaceInsta Backend running on port ${PORT}`);
+    console.log(`🚀 YouFaceInsta API running on port ${PORT}`);
 });
