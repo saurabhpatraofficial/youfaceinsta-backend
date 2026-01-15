@@ -134,14 +134,28 @@ app.post('/download', async (req, res) => {
         
         if (!videoUrl) throw new Error('No URL found');
 
-        // Get title
+        // Get title and sanitize for filename (remove emojis and special chars)
         let title = `${platform}_${Date.now()}`;
         try {
             const { stdout: titleOut } = await execAsync(
                 `yt-dlp --print "%(title)s" --no-warnings '${safeUrl}'`, 
                 { timeout: 15000 }
             );
-            title = titleOut.trim().replace(/[<>:"/\\|?*\n\r]/g, '_').substring(0, 60) || title;
+            // Remove emojis, special unicode, and invalid filename chars
+            title = titleOut.trim()
+                .replace(/[\u{1F600}-\u{1F6FF}]/gu, '') // emojis
+                .replace(/[\u{2600}-\u{26FF}]/gu, '')   // symbols
+                .replace(/[\u{2700}-\u{27BF}]/gu, '')   // dingbats
+                .replace(/[\u{1F300}-\u{1F5FF}]/gu, '') // misc symbols
+                .replace(/[\u{1F900}-\u{1F9FF}]/gu, '') // supplemental symbols
+                .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '') // chess symbols
+                .replace(/[\u{1FA70}-\u{1FAFF}]/gu, '') // symbols extended
+                .replace(/[\u{FE00}-\u{FE0F}]/gu, '')   // variation selectors
+                .replace(/[^\x00-\x7F]/g, '')           // non-ASCII
+                .replace(/[<>:"/\\|?*\n\r]/g, '_')
+                .replace(/_+/g, '_')
+                .trim()
+                .substring(0, 60) || title;
         } catch (e) {}
 
         const ext = format === 'audio' ? 'mp3' : 'mp4';
