@@ -46,50 +46,43 @@ app.post('/download', async (req, res) => {
         console.log(`Processing: ${platform} | ${format} | ${quality} | ${url}`);
 
         // Escape URL properly
-        const safeUrl = url.replace(/"/g, '\\"').replace(/\$/g, '\\$');
+        const safeUrl = url.replace(/'/g, "'\\''");
 
-        // Build yt-dlp command based on platform
-        let cmd = 'yt-dlp';
-        cmd += ' --no-warnings';
-        cmd += ' --no-playlist';
-        cmd += ' -g'; // Get direct URL only
+        // Build yt-dlp command
+        let cmd = 'yt-dlp --no-warnings --no-playlist -g';
 
-        if (platform === 'youtube') {
-            // YouTube specific: avoid HLS/DASH manifests, get direct MP4
-            if (format === 'audio') {
-                // Get best audio as direct URL (m4a/webm)
-                cmd += ' -f "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio"';
-            } else {
-                // Get combined format (video+audio in one file) to avoid manifest URLs
-                // Use specific format codes that give direct URLs
-                const qualityMap = {
-                    '4320': '401/400/266/264/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                    '2160': '401/400/266/264/313/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]/best',
-                    '1080': '399/137/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
-                    '720': '398/136/22/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/22/best[height<=720][ext=mp4]/best',
-                    '480': '397/135/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best'
-                };
-                // Prefer format 22 (720p mp4 combined) or 18 (360p mp4 combined) as they're direct URLs
-                cmd += ` -f "22/18/${qualityMap[quality] || qualityMap['720']}"`;
-            }
+        if (format === 'audio') {
+            cmd += ' -f "bestaudio"';
         } else {
-            // Facebook/Instagram: simpler format selection
-            if (format === 'audio') {
-                cmd += ' -f "bestaudio/best"';
+            if (platform === 'youtube') {
+                // For YouTube: try to get a combined format (mp4 with audio)
+                // Format 18 = 360p mp4, Format 22 = 720p mp4 (both have audio)
+                const qualityFormats = {
+                    '4320': 'best[height<=4320]',
+                    '2160': 'best[height<=2160]',
+                    '1080': 'best[height<=1080]',
+                    '720': '22/best[height<=720]',
+                    '480': '18/best[height<=480]'
+                };
+                cmd += ` -f "${qualityFormats[quality] || 'best'}"`;
             } else {
-                cmd += ' -f "best[ext=mp4]/best"';
+                cmd += ' -f "best"';
             }
         }
 
-        cmd += ` "${safeUrl}"`;
+        cmd += ` '${safeUrl}'`;
 
-        console.log(`Running: ${cmd}`);
+        console.log(`Command: ${cmd}`);
 
         // Execute yt-dlp
         const { stdout, stderr } = await execAsync(cmd, { 
-            timeout: 30000,
-            maxBuffer: 1024 * 1024 * 5
+            timeout: 45000,
+            maxBuffer: 1024 * 1024 * 10
         });
+
+        if (stderr) {
+            console.log('stderr:', stderr);
+        }
 
         const urls = stdout.trim().split('\n').filter(u => u.startsWith('http'));
         
@@ -97,14 +90,16 @@ app.post('/download', async (req, res) => {
             throw new Error('No download URL found');
         }
 
+        console.log(`Found URL: ${urls[0].substring(0, 100)}...`);
+
         // Get title for filename
-        let title = 'download';
+        let title = `${platform}_video`;
         try {
-            const titleCmd = `yt-dlp --print "%(title)s" --no-warnings "${safeUrl}"`;
-            const titleResult = await execAsync(titleCmd, { timeout: 10000 });
-            title = titleResult.stdout.trim().replace(/[<>:"/\\|?*]/g, '_').substring(0, 100) || 'download';
+            const titleCmd = `yt-dlp --print "%(title)s" --no-warnings '${safeUrl}'`;
+            const titleResult = await execAsync(titleCmd, { timeout: 15000 });
+            title = titleResult.stdout.trim().replace(/[<>:"/\\|?*\n]/g, '_').substring(0, 80) || title;
         } catch (e) {
-            console.log('Could not get title');
+            console.log('Could not get title:', e.message);
         }
 
         const ext = format === 'audio' ? 'mp3' : 'mp4';
@@ -118,17 +113,20 @@ app.post('/download', async (req, res) => {
 
     } catch (error) {
         console.error('Error:', error.message);
+        if (error.stderr) console.error('stderr:', error.stderr);
         
         let errorMsg = 'Download failed. Please try again.';
         
-        if (error.message.includes('Private video')) {
+        if (error.message.includes('Private')) {
             errorMsg = 'This video is private';
-        } else if (error.message.includes('Video unavailable')) {
+        } else if (error.message.includes('unavailable') || error.message.includes('not available')) {
             errorMsg = 'Video is unavailable';
-        } else if (error.message.includes('Sign in')) {
+        } else if (error.message.includes('Sign in') || error.message.includes('login')) {
             errorMsg = 'This content requires login';
-        } else if (error.message.includes('timeout')) {
+        } else if (error.message.includes('timeout') || error.message.includes('TIMEOUT')) {
             errorMsg = 'Request timed out. Try again.';
+        } else if (error.message.includes('No video formats') || error.message.includes('no formats')) {
+            errorMsg = 'No downloadable format found';
         }
 
         res.status(500).json({ error: errorMsg });
