@@ -10,6 +10,18 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Update yt-dlp on startup
+async function updateYtDlp() {
+    try {
+        console.log('Updating yt-dlp...');
+        await execAsync('yt-dlp -U', { timeout: 30000 });
+        console.log('yt-dlp updated!');
+    } catch (e) {
+        console.log('yt-dlp update skipped:', e.message);
+    }
+}
+updateYtDlp();
+
 // URL validators
 const PLATFORM_PATTERNS = {
     youtube: /^(https?:\/\/)?(www\.|m\.)?(youtube\.com|youtu\.be)\/.+/i,
@@ -43,31 +55,28 @@ app.post('/download', async (req, res) => {
             return res.status(400).json({ error: `Invalid ${platform} URL` });
         }
 
-        console.log(`Processing: ${platform} | ${format} | ${quality} | ${url}`);
+        console.log(`\n=== New Request ===`);
+        console.log(`Platform: ${platform}`);
+        console.log(`Format: ${format}`);
+        console.log(`Quality: ${quality}`);
+        console.log(`URL: ${url}`);
 
-        // Escape URL properly
+        // Escape URL properly for shell
         const safeUrl = url.replace(/'/g, "'\\''");
 
-        // Build yt-dlp command
-        let cmd = 'yt-dlp --no-warnings --no-playlist -g';
+        // Build yt-dlp command with extra options to bypass restrictions
+        let cmd = 'yt-dlp';
+        cmd += ' --no-warnings';
+        cmd += ' --no-playlist';
+        cmd += ' --no-check-certificates';
+        cmd += ' --prefer-insecure';
+        cmd += ' --geo-bypass';
+        cmd += ' -g'; // Get direct URL
 
         if (format === 'audio') {
-            cmd += ' -f "bestaudio"';
+            cmd += ' -f "bestaudio/best"';
         } else {
-            if (platform === 'youtube') {
-                // For YouTube: try to get a combined format (mp4 with audio)
-                // Format 18 = 360p mp4, Format 22 = 720p mp4 (both have audio)
-                const qualityFormats = {
-                    '4320': 'best[height<=4320]',
-                    '2160': 'best[height<=2160]',
-                    '1080': 'best[height<=1080]',
-                    '720': '22/best[height<=720]',
-                    '480': '18/best[height<=480]'
-                };
-                cmd += ` -f "${qualityFormats[quality] || 'best'}"`;
-            } else {
-                cmd += ' -f "best"';
-            }
+            cmd += ' -f "best[ext=mp4]/best"';
         }
 
         cmd += ` '${safeUrl}'`;
@@ -76,57 +85,66 @@ app.post('/download', async (req, res) => {
 
         // Execute yt-dlp
         const { stdout, stderr } = await execAsync(cmd, { 
-            timeout: 45000,
+            timeout: 60000,
             maxBuffer: 1024 * 1024 * 10
         });
 
         if (stderr) {
-            console.log('stderr:', stderr);
+            console.log('STDERR:', stderr);
         }
+
+        console.log('STDOUT:', stdout);
 
         const urls = stdout.trim().split('\n').filter(u => u.startsWith('http'));
         
         if (urls.length === 0) {
-            throw new Error('No download URL found');
+            throw new Error('No download URL in output');
         }
 
-        console.log(`Found URL: ${urls[0].substring(0, 100)}...`);
+        const downloadUrl = urls[0];
+        console.log(`Download URL: ${downloadUrl.substring(0, 80)}...`);
 
-        // Get title for filename
-        let title = `${platform}_video`;
+        // Get title
+        let title = `${platform}_video_${Date.now()}`;
         try {
             const titleCmd = `yt-dlp --print "%(title)s" --no-warnings '${safeUrl}'`;
             const titleResult = await execAsync(titleCmd, { timeout: 15000 });
-            title = titleResult.stdout.trim().replace(/[<>:"/\\|?*\n]/g, '_').substring(0, 80) || title;
+            const cleanTitle = titleResult.stdout.trim().replace(/[<>:"/\\|?*\n\r]/g, '_').substring(0, 80);
+            if (cleanTitle) title = cleanTitle;
         } catch (e) {
-            console.log('Could not get title:', e.message);
+            console.log('Title fetch failed:', e.message);
         }
 
         const ext = format === 'audio' ? 'mp3' : 'mp4';
 
+        console.log(`Success! Returning: ${title}.${ext}`);
+
         res.json({
             success: true,
-            directUrl: urls[0],
+            directUrl: downloadUrl,
             filename: `${title}.${ext}`,
             title: title
         });
 
     } catch (error) {
-        console.error('Error:', error.message);
-        if (error.stderr) console.error('stderr:', error.stderr);
+        console.error('\n=== ERROR ===');
+        console.error('Message:', error.message);
+        if (error.stderr) console.error('STDERR:', error.stderr);
+        if (error.stdout) console.error('STDOUT:', error.stdout);
         
         let errorMsg = 'Download failed. Please try again.';
+        const errText = (error.message + ' ' + (error.stderr || '')).toLowerCase();
         
-        if (error.message.includes('Private')) {
+        if (errText.includes('private')) {
             errorMsg = 'This video is private';
-        } else if (error.message.includes('unavailable') || error.message.includes('not available')) {
-            errorMsg = 'Video is unavailable';
-        } else if (error.message.includes('Sign in') || error.message.includes('login')) {
-            errorMsg = 'This content requires login';
-        } else if (error.message.includes('timeout') || error.message.includes('TIMEOUT')) {
+        } else if (errText.includes('unavailable') || errText.includes('not available') || errText.includes('video is not available')) {
+            errorMsg = 'Video unavailable. Try a different video.';
+        } else if (errText.includes('sign in') || errText.includes('login') || errText.includes('age')) {
+            errorMsg = 'This video requires login/age verification';
+        } else if (errText.includes('timeout')) {
             errorMsg = 'Request timed out. Try again.';
-        } else if (error.message.includes('No video formats') || error.message.includes('no formats')) {
-            errorMsg = 'No downloadable format found';
+        } else if (errText.includes('copyright') || errText.includes('blocked')) {
+            errorMsg = 'Video is blocked/copyrighted';
         }
 
         res.status(500).json({ error: errorMsg });
