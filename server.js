@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const { exec } = require('child_process');
 const { promisify } = require('util');
+const https = require('https');
+const http = require('http');
 
 const execAsync = promisify(exec);
 const app = express();
@@ -9,6 +11,9 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// Store video URLs temporarily (in production, use Redis)
+const videoCache = new Map();
 
 // URL validators
 const PLATFORM_PATTERNS = {
@@ -26,7 +31,75 @@ app.get('/', (req, res) => {
     res.json({ status: 'ok', message: 'YouFaceInsta API' });
 });
 
-// Download endpoint - returns direct URL for browser download
+// File download endpoint - proxies the video with download headers
+app.get('/file/:id', async (req, res) => {
+    const { id } = req.params;
+    const cached = videoCache.get(id);
+    
+    if (!cached) {
+        return res.status(404).json({ error: 'Link expired. Please try again.' });
+    }
+    
+    const { url, filename } = cached;
+    console.log(`Downloading: ${filename}`);
+    
+    try {
+        // Set download headers
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'application/octet-stream');
+        
+        const protocol = url.startsWith('https') ? https : http;
+        
+        const request = protocol.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*',
+                'Accept-Encoding': 'identity',
+                'Connection': 'keep-alive'
+            }
+        }, (response) => {
+            // Handle redirects
+            if (response.statusCode === 302 || response.statusCode === 301) {
+                const redirectUrl = response.headers.location;
+                console.log('Redirecting to:', redirectUrl);
+                const proto = redirectUrl.startsWith('https') ? https : http;
+                proto.get(redirectUrl, (redirectRes) => {
+                    if (redirectRes.headers['content-length']) {
+                        res.setHeader('Content-Length', redirectRes.headers['content-length']);
+                    }
+                    redirectRes.pipe(res);
+                }).on('error', (e) => {
+                    console.error('Redirect error:', e);
+                    if (!res.headersSent) res.status(500).end();
+                });
+                return;
+            }
+            
+            if (response.headers['content-length']) {
+                res.setHeader('Content-Length', response.headers['content-length']);
+            }
+            
+            response.pipe(res);
+            
+            response.on('error', (err) => {
+                console.error('Response error:', err);
+            });
+        });
+        
+        request.on('error', (err) => {
+            console.error('Request error:', err);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Download failed' });
+            }
+        });
+        
+    } catch (error) {
+        console.error('File error:', error);
+        res.status(500).json({ error: 'Download failed' });
+    }
+});
+
+// Main download endpoint
 app.post('/download', async (req, res) => {
     try {
         const { url, platform, format } = req.body;
@@ -39,11 +112,11 @@ app.post('/download', async (req, res) => {
             return res.status(400).json({ error: 'Invalid URL' });
         }
 
-        console.log(`Processing: ${platform} | ${format} | ${url}`);
+        console.log(`\nProcessing: ${platform} | ${format} | ${url}`);
 
         const safeUrl = url.replace(/'/g, "'\\''");
 
-        // Get video URL using yt-dlp
+        // Get video URL
         let cmd = 'yt-dlp --no-warnings --no-playlist --geo-bypass -g';
         cmd += format === 'audio' ? ' -f "bestaudio/best"' : ' -f "best"';
         cmd += ` '${safeUrl}'`;
@@ -56,21 +129,29 @@ app.post('/download', async (req, res) => {
         // Get title
         let title = `${platform}_${Date.now()}`;
         try {
-            const { stdout: t } = await execAsync(
+            const { stdout: titleOut } = await execAsync(
                 `yt-dlp --print "%(title)s" --no-warnings '${safeUrl}'`, 
                 { timeout: 15000 }
             );
-            title = t.trim().replace(/[<>:"/\\|?*\n\r]/g, '_').substring(0, 60) || title;
+            title = titleOut.trim().replace(/[<>:"/\\|?*\n\r]/g, '_').substring(0, 60) || title;
         } catch (e) {}
 
         const ext = format === 'audio' ? 'mp3' : 'mp4';
+        const filename = `${title}.${ext}`;
+        
+        // Generate unique ID and cache the URL
+        const id = Math.random().toString(36).substring(2, 15);
+        videoCache.set(id, { url: videoUrl, filename });
+        
+        // Clean up cache after 5 minutes
+        setTimeout(() => videoCache.delete(id), 5 * 60 * 1000);
 
-        console.log(`Success: ${title}.${ext}`);
+        console.log(`Success! ID: ${id}, File: ${filename}`);
 
         res.json({
             success: true,
-            directUrl: videoUrl,
-            filename: `${title}.${ext}`,
+            downloadPath: `/file/${id}`,
+            filename: filename,
             title: title
         });
 
