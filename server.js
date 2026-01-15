@@ -2,8 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const { exec } = require('child_process');
 const { promisify } = require('util');
-const https = require('https');
-const http = require('http');
 
 const execAsync = promisify(exec);
 const app = express();
@@ -28,92 +26,10 @@ app.get('/', (req, res) => {
     res.json({ status: 'ok', message: 'YouFaceInsta API' });
 });
 
-// Get video info and direct URL
-async function getVideoInfo(url, format) {
-    const safeUrl = url.replace(/'/g, "'\\''");
-    
-    let cmd = 'yt-dlp';
-    cmd += ' --no-warnings --no-playlist --geo-bypass';
-    cmd += ' -g'; // Get URL
-    cmd += ' --print "%(title)s"'; // Get title
-    
-    if (format === 'audio') {
-        cmd += ' -f "bestaudio/best"';
-    } else {
-        cmd += ' -f "best[ext=mp4]/best"';
-    }
-    
-    cmd += ` '${safeUrl}'`;
-    
-    const { stdout } = await execAsync(cmd, { timeout: 60000 });
-    const lines = stdout.trim().split('\n');
-    
-    // Last line is title, others are URLs
-    const title = lines.pop() || 'download';
-    const downloadUrl = lines.find(l => l.startsWith('http'));
-    
-    if (!downloadUrl) throw new Error('No URL found');
-    
-    return {
-        url: downloadUrl,
-        title: title.replace(/[<>:"/\\|?*\n\r]/g, '_').substring(0, 80)
-    };
-}
-
-// Proxy download - streams the file to user with download headers
-app.get('/proxy', async (req, res) => {
-    try {
-        const { url, filename } = req.query;
-        
-        if (!url) {
-            return res.status(400).json({ error: 'Missing URL' });
-        }
-
-        console.log(`Proxying download: ${filename}`);
-        
-        // Set headers to force download
-        res.setHeader('Content-Disposition', `attachment; filename="${filename || 'download.mp4'}"`);
-        res.setHeader('Content-Type', 'application/octet-stream');
-        
-        // Fetch and pipe the video
-        const protocol = url.startsWith('https') ? https : http;
-        
-        protocol.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        }, (videoRes) => {
-            // Forward content headers
-            if (videoRes.headers['content-length']) {
-                res.setHeader('Content-Length', videoRes.headers['content-length']);
-            }
-            
-            // Pipe video to response
-            videoRes.pipe(res);
-            
-            videoRes.on('error', (err) => {
-                console.error('Stream error:', err);
-                if (!res.headersSent) {
-                    res.status(500).json({ error: 'Download failed' });
-                }
-            });
-        }).on('error', (err) => {
-            console.error('Request error:', err);
-            if (!res.headersSent) {
-                res.status(500).json({ error: 'Download failed' });
-            }
-        });
-        
-    } catch (error) {
-        console.error('Proxy error:', error);
-        res.status(500).json({ error: 'Download failed' });
-    }
-});
-
-// Main download endpoint - returns proxy URL for actual download
+// Download endpoint
 app.post('/download', async (req, res) => {
     try {
-        const { url, platform, format, quality } = req.body;
+        const { url, platform, format } = req.body;
 
         if (!url || !platform || !format) {
             return res.status(400).json({ error: 'Missing required fields' });
@@ -127,40 +43,67 @@ app.post('/download', async (req, res) => {
             return res.status(400).json({ error: `Invalid ${platform} URL` });
         }
 
-        console.log(`\n=== Download Request ===`);
-        console.log(`Platform: ${platform}, Format: ${format}`);
-        console.log(`URL: ${url}`);
+        console.log(`Processing: ${platform} | ${format} | ${url}`);
 
-        const info = await getVideoInfo(url, format);
+        const safeUrl = url.replace(/'/g, "'\\''");
+
+        // Build yt-dlp command
+        let cmd = 'yt-dlp --no-warnings --no-playlist --geo-bypass -g';
+        
+        if (format === 'audio') {
+            cmd += ' -f "bestaudio/best"';
+        } else {
+            cmd += ' -f "best"';
+        }
+        
+        cmd += ` '${safeUrl}'`;
+
+        console.log(`Command: ${cmd}`);
+
+        const { stdout, stderr } = await execAsync(cmd, { 
+            timeout: 60000,
+            maxBuffer: 1024 * 1024 * 10
+        });
+
+        if (stderr) console.log('stderr:', stderr);
+
+        const urls = stdout.trim().split('\n').filter(u => u.startsWith('http'));
+        
+        if (urls.length === 0) {
+            throw new Error('No download URL found');
+        }
+
+        // Get title
+        let title = `${platform}_download`;
+        try {
+            const titleCmd = `yt-dlp --print "%(title)s" --no-warnings '${safeUrl}'`;
+            const titleResult = await execAsync(titleCmd, { timeout: 15000 });
+            title = titleResult.stdout.trim().replace(/[<>:"/\\|?*\n\r]/g, '_').substring(0, 80) || title;
+        } catch (e) {
+            console.log('Title error:', e.message);
+        }
+
         const ext = format === 'audio' ? 'mp3' : 'mp4';
-        const filename = `${info.title}.${ext}`;
-        
-        // Return proxy URL that will force download
-        const proxyUrl = `/proxy?url=${encodeURIComponent(info.url)}&filename=${encodeURIComponent(filename)}`;
-        
-        console.log(`Success! File: ${filename}`);
+
+        console.log(`Success: ${title}`);
 
         res.json({
             success: true,
-            downloadUrl: proxyUrl,
-            filename: filename,
-            title: info.title
+            directUrl: urls[0],
+            filename: `${title}.${ext}`,
+            title: title
         });
 
     } catch (error) {
         console.error('Error:', error.message);
-        if (error.stderr) console.error('STDERR:', error.stderr);
+        if (error.stderr) console.error('stderr:', error.stderr);
         
         let errorMsg = 'Download failed. Please try again.';
         const errText = (error.message + ' ' + (error.stderr || '')).toLowerCase();
         
-        if (errText.includes('private')) {
-            errorMsg = 'This video is private';
-        } else if (errText.includes('unavailable')) {
-            errorMsg = 'Video unavailable';
-        } else if (errText.includes('sign in') || errText.includes('age')) {
-            errorMsg = 'Video requires login/age verification';
-        }
+        if (errText.includes('private')) errorMsg = 'Video is private';
+        else if (errText.includes('unavailable')) errorMsg = 'Video unavailable';
+        else if (errText.includes('sign in')) errorMsg = 'Requires login';
 
         res.status(500).json({ error: errorMsg });
     }
