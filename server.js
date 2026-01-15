@@ -43,31 +43,44 @@ app.post('/download', async (req, res) => {
             return res.status(400).json({ error: `Invalid ${platform} URL` });
         }
 
-        console.log(`Processing: ${platform} | ${format} | ${url}`);
+        console.log(`Processing: ${platform} | ${format} | ${quality} | ${url}`);
 
-        // Build yt-dlp command
+        // Escape URL properly
+        const safeUrl = url.replace(/"/g, '\\"').replace(/\$/g, '\\$');
+
+        // Build yt-dlp command based on platform
         let cmd = 'yt-dlp';
         cmd += ' --no-warnings';
         cmd += ' --no-playlist';
         cmd += ' -g'; // Get direct URL only
 
-        if (format === 'audio') {
-            cmd += ' -f "bestaudio/best"';
+        if (platform === 'youtube') {
+            // YouTube specific: avoid HLS/DASH manifests, get direct MP4
+            if (format === 'audio') {
+                // Get best audio as direct URL (m4a/webm)
+                cmd += ' -f "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio"';
+            } else {
+                // Get combined format (video+audio in one file) to avoid manifest URLs
+                // Use specific format codes that give direct URLs
+                const qualityMap = {
+                    '4320': '401/400/266/264/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                    '2160': '401/400/266/264/313/bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]/best',
+                    '1080': '399/137/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
+                    '720': '398/136/22/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/22/best[height<=720][ext=mp4]/best',
+                    '480': '397/135/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best'
+                };
+                // Prefer format 22 (720p mp4 combined) or 18 (360p mp4 combined) as they're direct URLs
+                cmd += ` -f "22/18/${qualityMap[quality] || qualityMap['720']}"`;
+            }
         } else {
-            // Video with quality
-            const qualityMap = {
-                '4320': 'bestvideo[height<=4320]+bestaudio/best[height<=4320]/best',
-                '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best',
-                '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
-                '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-                '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]/best'
-            };
-            const formatStr = qualityMap[quality] || qualityMap['720'];
-            cmd += ` -f "${formatStr}"`;
+            // Facebook/Instagram: simpler format selection
+            if (format === 'audio') {
+                cmd += ' -f "bestaudio/best"';
+            } else {
+                cmd += ' -f "best[ext=mp4]/best"';
+            }
         }
 
-        // Escape URL properly
-        const safeUrl = url.replace(/"/g, '\\"');
         cmd += ` "${safeUrl}"`;
 
         console.log(`Running: ${cmd}`);
