@@ -119,11 +119,20 @@ app.post('/download', async (req, res) => {
         // Get video URL - platform specific options
         let cmd = 'yt-dlp --no-warnings --no-playlist --geo-bypass -g';
         
-        if (platform === 'facebook') {
+        if (platform === 'youtube') {
+            // YouTube: use flexible format selection
+            if (format === 'audio') {
+                cmd += ' -f "bestaudio[ext=m4a]/bestaudio/best"';
+            } else {
+                // Try multiple format options for YouTube
+                cmd += ' -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"';
+            }
+        } else if (platform === 'facebook') {
             // Facebook needs special handling
             cmd += ' --extractor-args "facebook:webpage=false"';
             cmd += format === 'audio' ? ' -f "bestaudio/best"' : ' -f "best[ext=mp4]/best"';
         } else {
+            // Instagram and others
             cmd += format === 'audio' ? ' -f "bestaudio/best"' : ' -f "best"';
         }
         
