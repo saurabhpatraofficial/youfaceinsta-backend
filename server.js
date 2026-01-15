@@ -18,7 +18,7 @@ const videoCache = new Map();
 // URL validators
 const PLATFORM_PATTERNS = {
     youtube: /^(https?:\/\/)?(www\.|m\.)?(youtube\.com|youtu\.be)\/.+/i,
-    facebook: /^(https?:\/\/)?(www\.|m\.|web\.)?(facebook\.com|fb\.watch)\/.+/i,
+    facebook: /^(https?:\/\/)?(www\.|m\.|web\.|l\.)?(facebook\.com|fb\.watch|fb\.com)\/.+/i,
     instagram: /^(https?:\/\/)?(www\.)?instagram\.com\/(p|reel|reels|tv)\/.+/i
 };
 
@@ -116,9 +116,17 @@ app.post('/download', async (req, res) => {
 
         const safeUrl = url.replace(/'/g, "'\\''");
 
-        // Get video URL
+        // Get video URL - platform specific options
         let cmd = 'yt-dlp --no-warnings --no-playlist --geo-bypass -g';
-        cmd += format === 'audio' ? ' -f "bestaudio/best"' : ' -f "best"';
+        
+        if (platform === 'facebook') {
+            // Facebook needs special handling
+            cmd += ' --extractor-args "facebook:webpage=false"';
+            cmd += format === 'audio' ? ' -f "bestaudio/best"' : ' -f "best[ext=mp4]/best"';
+        } else {
+            cmd += format === 'audio' ? ' -f "bestaudio/best"' : ' -f "best"';
+        }
+        
         cmd += ` '${safeUrl}'`;
 
         const { stdout } = await execAsync(cmd, { timeout: 60000 });
