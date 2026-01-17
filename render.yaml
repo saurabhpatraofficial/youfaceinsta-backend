@@ -1,0 +1,10 @@
+# Render.com deployment config
+services:
+  - type: web
+    name: youfaceinsta-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
