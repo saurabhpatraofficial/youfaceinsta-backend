@@ -2,24 +2,23 @@
 
 Self-hosted backend with yt-dlp for video downloading.
 
-## Deploy to Railway (Free)
+## Deploy to Render (Docker)
 
-1. **Create Railway Account**: Go to [railway.app](https://railway.app) and sign up
+1. **Create Render Service**:
+   - New Web Service → connect your GitHub repo
+   - Root Directory: `youfaceinsta-backend`
+   - Runtime: Docker
 
-2. **Deploy from GitHub**:
-   - Push this `backend` folder to a new GitHub repo
-   - In Railway, click "New Project" → "Deploy from GitHub repo"
-   - Select your repo
-   - Railway will auto-detect and deploy
+2. **Docker Settings**:
+   - Docker Build Context: `youfaceinsta-backend`
+   - Dockerfile Path: `youfaceinsta-backend/Dockerfile`
 
-3. **Get Your API URL**:
-   - After deployment, go to Settings → Domains
-   - Click "Generate Domain"
-   - Copy the URL (e.g., `https://your-app.up.railway.app`)
+3. **Deploy**:
+   - Click Create Web Service and wait for the service to go live
 
 4. **Update Frontend**:
    - Edit `script.js` in the main site
-   - Change `API_BASE_URL` to your Railway URL
+   - Change `API_URL` to your Render URL
 
 ## API Endpoints
 
@@ -47,7 +46,7 @@ Get video information.
 ## Local Development
 
 ```bash
-cd backend
+cd youfaceinsta-backend
 npm install
 npm start
 ```
